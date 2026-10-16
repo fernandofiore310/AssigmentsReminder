@@ -7,7 +7,7 @@ import unittest
 from unittest.mock import patch, MagicMock
 from zoneinfo import ZoneInfo
 
-from reminder import Canvas, collect, render, send, run, delivery_key
+from reminder import Canvas, collect, render, send, run, delivery_key, main
 
 
 class FakeCanvas:
@@ -48,10 +48,56 @@ class ReminderTests(unittest.TestCase):
         self.assertNotIn("<p>", digest)
         self.assertEqual([a["title"] for a in announcements], ["Office hours"])
 
-    def test_all_open_assignments_by_default(self):
+    def test_assignments_default_to_two_weeks(self):
         now = datetime(2026, 10, 16, 12, tzinfo=timezone.utc)
         assignments, _ = collect(FakeCanvas(), now)
-        self.assertIn("Later", [a["title"] for a in assignments])
+        self.assertNotIn("Later", [a["title"] for a in assignments])
+        self.assertIn("Upcoming", [a["title"] for a in assignments])
+
+    def test_two_week_boundary_is_inclusive(self):
+        now = datetime(2026, 10, 16, 12, tzinfo=timezone.utc)
+        canvas = MagicMock()
+        canvas.pages.side_effect = [[{"id": 42, "name": "CS"}],
+                                    [{"name": "At boundary", "due_at": "2026-10-30T12:00:00Z"},
+                                     {"name": "Beyond", "due_at": "2026-10-30T12:00:01Z"}], []]
+        assignments, _ = collect(canvas, now)
+        self.assertEqual([item["title"] for item in assignments], ["At boundary"])
+
+    def test_digest_does_not_append_resource_urls(self):
+        now = datetime(2026, 10, 16, 12, tzinfo=timezone.utc)
+        digest = render([{"course": "CS", "title": "Homework", "due": None,
+                          "url": "https://bcourses.berkeley.edu/assignments/1"}],
+                        [{"course": "CS", "title": "News", "text": "Office hours today",
+                          "url": "https://bcourses.berkeley.edu/announcements/1"}],
+                        now, ZoneInfo("America/Los_Angeles"))
+        self.assertNotIn("https://", digest)
+        self.assertIn("Homework", digest)
+        self.assertIn("Office hours today", digest)
+
+    @patch.dict("os.environ", {"TELEGRAM_CHAT_ID": "123"})
+    @patch("reminder.datetime")
+    @patch("reminder.run")
+    def test_cloud_schedule_respects_dst_and_does_not_repeat(self, run_mock, clock):
+        # 15:00 UTC = 08:00 summer, but 07:00 winter in Berkeley.
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "state.json"
+            args = Namespace(channel="telegram")
+            key = f"{delivery_key(args)}:America/Los_Angeles:08:00"
+            argv = ["reminder.py", "--channel", "telegram", "--daily-at", "08:00",
+                    "--scheduled-once", "--state", str(path)]
+            for date, utc_hour, expected in [("2026-07-01", 15, True), ("2026-12-01", 15, False),
+                                              ("2026-12-01", 16, True)]:
+                utc = datetime.fromisoformat(f"{date}T{utc_hour}:00:00+00:00")
+                clock.now.return_value = utc.astimezone(ZoneInfo("America/Los_Angeles"))
+                run_mock.reset_mock()
+                with patch("sys.argv", argv):
+                    main()
+                self.assertEqual(run_mock.called, expected)
+            path.write_text(json.dumps({"daily": {key: "2026-12-01"}}))
+            run_mock.reset_mock()
+            with patch("sys.argv", argv):
+                main()
+            run_mock.assert_not_called()
 
     def test_announcements_use_exact_interval_even_after_missed_days(self):
         now = datetime(2026, 10, 16, 12, tzinfo=timezone.utc)

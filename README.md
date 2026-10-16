@@ -6,9 +6,10 @@ Usa Python 3.11+ e a biblioteca padrão; não há pacotes para instalar.
 ## O que entra no resumo
 
 - Disciplinas com matrícula ativa como aluno.
-- Todas as tarefas publicadas, acessíveis e ainda abertas, inclusive sem prazo. Tarefas com `due_at` vencido, `lock_at` encerrado ou `unlock_at` futuro são excluídas. Isso também exclui tarefas atrasadas mesmo que o professor aceite entrega com atraso.
+- Tarefas publicadas, acessíveis e ainda abertas, com vencimento nos próximos 14 dias, inclusive o limite de duas semanas. Tarefas sem prazo também aparecem. Tarefas com `due_at` vencido, `lock_at` encerrado ou `unlock_at` futuro são excluídas. Isso também exclui tarefas atrasadas mesmo que o professor aceite entrega com atraso.
 - Entregas registradas e tarefas dispensadas são omitidas. Tarefas marcadas como faltantes continuam aparecendo, mesmo com nota zero.
-- Anúncios publicados desde o último resumo enviado com sucesso para aquele destino, com trecho do texto e link. No primeiro envio, considera as últimas 24 horas. O corte avança somente depois que todas as mensagens são aceitas pelo serviço.
+- Anúncios publicados desde o último resumo enviado com sucesso para aquele destino, com trecho do texto. No primeiro envio, considera as últimas 24 horas. O corte avança somente depois que todas as mensagens são aceitas pelo serviço.
+- O terminal e o Telegram usam o mesmo texto. Links de acesso às tarefas e anúncios não são acrescentados ao resumo; URLs escritas pelo professor no próprio anúncio podem continuar aparecendo.
 - Horários de Berkeley (`America/Los_Angeles`), incluindo horário de verão.
 
 O resumo depende dos dados disponíveis na API. Confira também o bCourses: atividades em ferramentas externas ou com configurações especiais podem não aparecer como pendentes no Canvas.
@@ -51,6 +52,23 @@ python3 reminder.py --channel email
 
 ## Envio diário
 
+### Nuvem: GitHub Actions
+
+O workflow `.github/workflows/daily-digest.yml` executa em computadores do GitHub, sem depender do seu notebook ou do Publish do Codex. Para ativar no seu repositório:
+
+1. Abra **Settings → Secrets and variables → Actions → New repository secret** e configure `CANVAS_TOKEN`, `TELEGRAM_BOT_TOKEN` e `TELEGRAM_CHAT_ID`. Os valores configurados no Codex ou no seu WSL não são transferidos automaticamente. Não coloque tokens em arquivos nem em logs.
+2. Em **Actions**, habilite workflows se o GitHub solicitar. O workflow precisa poder escrever no repositório para preservar o estado; políticas da organização e regras de proteção de branches podem restringir essa operação.
+3. Abra **Daily bCourses digest → Run workflow**. Antes das 08:00 de Berkeley, ele apenas verifica o horário e encerra. Depois das 08:00, envia se ainda não enviou naquele dia. Confira o resultado em Actions e a mensagem no Telegram.
+4. Confira também a etapa **Persist delivery state**. Ela precisa concluir com sucesso; se enviar a mensagem mas falhar ao salvar o estado, a próxima execução pode repetir anúncios.
+
+Os agendamentos disparam às 15:00 e 16:00 UTC. O programa verifica o fuso de Berkeley e registra a data para enviar uma única vez, a partir das 08:00 tanto no verão quanto no inverno. GitHub Actions pode atrasar ou deixar de executar agendamentos; não oferece garantia de entrega pontual. Execuções programadas só usam a branch padrão. Em repositórios públicos, agendamentos podem ser desativados após 60 dias sem atividade. Verifique os limites e eventuais custos da sua conta, especialmente em repositórios privados.
+
+O registro fica na branch separada `reminder-state`, contendo apenas horários e identificadores de destino em hash, sem tokens ou conteúdo acadêmico. A branch é criada pelo primeiro envio bem-sucedido. Cada execução restaura esse registro antes da consulta. Em repositórios públicos, esses metadados também ficam públicos. Falhas de envio não avançam o corte dos anúncios; uma interrupção após enviar e antes de persistir o estado pode provocar repetição.
+
+O primeiro envio na nuvem começa com as últimas 24 horas, independentemente do arquivo de estado do seu WSL. Depois de ativar na nuvem, pare qualquer agendador local com `Ctrl+C` para evitar dois serviços enviando resumos. O estado da nuvem e o local são independentes.
+
+### Computador local / WSL
+
 Horário escolhido: **todos os dias às 08:00 de Berkeley**, com ajuste automático ao horário de verão. Depois de configurar as três variáveis, execute:
 
 ```bash
@@ -58,7 +76,7 @@ cd /workspace/AssigmentsReminder
 bash start_daily.sh
 ```
 
-O processo precisa rodar continuamente em um computador ou servidor ligado. Uma sessão temporária de desenvolvimento não garante notificações quando suspensa. Para uso permanente, execute o comando como serviço no provedor escolhido, com reinício automático e variáveis secretas configuradas. Nenhum serviço foi publicado por este projeto.
+Nesse modo, o processo precisa rodar continuamente em um computador ou servidor ligado. Uma sessão temporária de desenvolvimento não garante notificações quando suspensa.
 
 O arquivo local `.reminder-state.json` registra o dia e o instante do último resumo enviado com sucesso. Preserve-o entre reinícios e execute uma única instância por destino. Se iniciar depois do horário, envia o resumo daquele dia imediatamente. Falhas são repetidas a cada cinco minutos, sem avançar o corte dos anúncios. Uma interrupção durante o envio pode repetir mensagens; não há garantia de entrega exatamente uma vez. Se o estado for apagado, o próximo envio volta à janela inicial de 24 horas.
 

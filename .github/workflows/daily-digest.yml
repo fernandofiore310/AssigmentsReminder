@@ -1,0 +1,71 @@
+name: Daily bCourses digest
+
+on:
+  schedule:
+    # GitHub uses UTC: 08:00 Berkeley is 15:00 or 16:00 UTC.
+    # The program checks local time and saved state to send once per day.
+    - cron: '0 15,16 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: bcourses-daily-digest
+  cancel-in-progress: false
+
+jobs:
+  digest:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Run tests
+        run: python3 -m unittest discover -s tests -v
+      - name: Restore last successful delivery
+        shell: bash
+        run: |
+          set -euo pipefail
+          if git ls-remote --exit-code --heads origin reminder-state > /dev/null; then
+            git fetch --depth=1 origin +refs/heads/reminder-state:refs/remotes/origin/reminder-state
+            git show FETCH_HEAD:state.json > .reminder-state.json
+          else
+            status=$?
+            if [ "$status" -ne 2 ]; then
+              exit "$status"
+            fi
+            echo 'First cloud delivery: using the initial 24-hour window.'
+          fi
+      - name: Send digest when due
+        env:
+          CANVAS_TOKEN: ${{ secrets.CANVAS_TOKEN }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: |
+          python3 reminder.py --channel telegram --daily-at 08:00 --scheduled-once --days 14 --timezone America/Los_Angeles
+      - name: Persist delivery state
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ ! -f .reminder-state.json ]; then
+            exit 0
+          fi
+          parent=()
+          if git show-ref --verify --quiet refs/remotes/origin/reminder-state; then
+            previous=$(git rev-parse refs/remotes/origin/reminder-state)
+            if git show "$previous:state.json" | cmp -s - .reminder-state.json; then
+              exit 0
+            fi
+            parent=(-p "$previous")
+          fi
+          blob=$(git hash-object -w .reminder-state.json)
+          tree=$(printf '100644 blob %s\tstate.json\n' "$blob" | git mktree)
+          export GIT_AUTHOR_NAME='github-actions[bot]'
+          export GIT_AUTHOR_EMAIL='41898282+github-actions[bot]@users.noreply.github.com'
+          export GIT_COMMITTER_NAME="$GIT_AUTHOR_NAME"
+          export GIT_COMMITTER_EMAIL="$GIT_AUTHOR_EMAIL"
+          commit=$(git commit-tree "$tree" "${parent[@]}" -m 'Record successful digest delivery')
+          git push origin "$commit:refs/heads/reminder-state"

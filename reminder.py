@@ -73,7 +73,7 @@ class Canvas:
                 url = urljoin(url, match.group(1)) if match else None
 
 
-def collect(canvas, now, days=None, since=None):
+def collect(canvas, now, days=14, since=None):
     since = since or now - timedelta(hours=24)
     assignments, announcements = [], []
     courses = canvas.pages("courses", {"enrollment_state": "active", "enrollment_type": "student"})
@@ -116,7 +116,7 @@ def collect(canvas, now, days=None, since=None):
     return assignments, announcements
 
 
-def render(assignments, announcements, now, tz, days=None, since=None):
+def render(assignments, announcements, now, tz, days=14, since=None):
     lines = [f"bCourses • {now.astimezone(tz):%d/%m/%Y}",
              "\nTarefas abertas e com prazo não vencido"]
     if days:
@@ -126,13 +126,13 @@ def render(assignments, announcements, now, tz, days=None, since=None):
     for item in assignments:
         due = item["due"]
         label = due.astimezone(tz).strftime("%d/%m às %H:%M") if due else "sem prazo"
-        lines.extend([f"• {item['course']} — {item['title']}", f"  {label}", item["url"]])
+        lines.extend([f"• {item['course']} — {item['title']}", f"  {label}"])
     since = since or now - timedelta(hours=24)
     lines.append(f"\nNovos anúncios desde {since.astimezone(tz):%d/%m/%Y às %H:%M}")
     if not announcements:
         lines.append("Nenhum anúncio nesse período.")
     for item in announcements:
-        lines.extend([f"• {item['course']} — {item['title']}", item["text"], item["url"]])
+        lines.extend([f"• {item['course']} — {item['title']}", item["text"]])
     lines.append("\nHorários: " + str(tz))
     return "\n".join(lines)
 
@@ -207,14 +207,17 @@ def run(args, daily_key=None, day=None):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--channel", choices=["console", "telegram", "email"], default="console")
-    parser.add_argument("--days", type=int, help="Limitar tarefas aos próximos N dias (padrão: todas as abertas)")
+    parser.add_argument("--days", type=int, default=14, help="Limitar tarefas aos próximos N dias (padrão: 14)")
     parser.add_argument("--timezone", default="America/Los_Angeles")
     parser.add_argument("--daily-at", help="Ficar em execução e enviar diariamente, HH:MM no fuso escolhido")
+    parser.add_argument("--scheduled-once", action="store_true", help="Executar uma vez após --daily-at, sem repetir no mesmo dia")
     parser.add_argument("--state", default=".reminder-state.json")
     args = parser.parse_args()
     if args.days is not None and args.days < 1:
         parser.error("--days precisa ser positivo")
     tz = ZoneInfo(args.timezone)
+    if args.scheduled_once and not args.daily_at:
+        parser.error("--scheduled-once requer --daily-at")
     if not args.daily_at:
         run(args)
         return
@@ -238,10 +241,14 @@ def main():
                 run(args, key, today)
                 print(f"Resumo enviado: {today}", flush=True)
             except (HTTPError, URLError, ValueError, OSError):
+                if args.scheduled_once:
+                    raise
                 # Do not log exception URLs: Telegram URLs contain the bot token.
                 print("Envio falhou; verifique conexão, credenciais e permissões. Nova tentativa em 5 minutos.", file=sys.stderr, flush=True)
                 time.sleep(300)
                 continue
+        if args.scheduled_once:
+            return
         time.sleep(30)
 
 
