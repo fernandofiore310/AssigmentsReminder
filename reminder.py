@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 from datetime import datetime, timedelta, timezone
 from email.message import EmailMessage
 from html.parser import HTMLParser
@@ -72,7 +73,8 @@ class Canvas:
                 url = urljoin(url, match.group(1)) if match else None
 
 
-def collect(canvas, now, days):
+def collect(canvas, now, days=None, since=None):
+    since = since or now - timedelta(hours=24)
     assignments, announcements = [], []
     courses = canvas.pages("courses", {"enrollment_state": "active", "enrollment_type": "student"})
     for course in courses:
@@ -91,33 +93,42 @@ def collect(canvas, now, days):
             if item.get("submission_types") == ["not_graded"]:
                 continue
             due = timestamp(item.get("due_at"))
-            if due is None or due <= now + timedelta(days=days):
-                assignments.append({"course": name, "title": item["name"], "due": due,
-                                    "url": item.get("html_url", "")})
+            unlock = timestamp(item.get("unlock_at"))
+            lock = timestamp(item.get("lock_at"))
+            if (due and due <= now) or (lock and lock <= now) or (unlock and unlock > now):
+                continue
+            if days and due and due > now + timedelta(days=days):
+                continue
+            assignments.append({"course": name, "title": item["name"], "due": due,
+                                "url": item.get("html_url", "")})
         for item in canvas.pages("announcements", {"context_codes[]": f"course_{cid}",
-                                 "start_date": (now - timedelta(days=7)).isoformat(),
+                                 "start_date": since.isoformat(),
                                  "end_date": now.isoformat()}):
+            posted = timestamp(item.get("posted_at"))
+            if not posted or not since < posted <= now:
+                continue
             announcements.append({"course": name, "title": item["title"],
                                   "text": plain(item.get("message"))[:500],
-                                  "date": timestamp(item.get("posted_at")),
+                                  "date": posted,
                                   "url": item.get("html_url", "")})
     assignments.sort(key=lambda a: a["due"] or datetime.max.replace(tzinfo=timezone.utc))
     announcements.sort(key=lambda a: a["date"] or now, reverse=True)
     return assignments, announcements
 
 
-def render(assignments, announcements, now, tz, days):
+def render(assignments, announcements, now, tz, days=None, since=None):
     lines = [f"bCourses • {now.astimezone(tz):%d/%m/%Y}",
-             f"\nTarefas: atrasadas, próximos {days} dias e sem prazo"]
+             "\nTarefas abertas e com prazo não vencido"]
+    if days:
+        lines.append(f"Próximos {days} dias e tarefas sem prazo")
     if not assignments:
         lines.append("Nenhuma tarefa pendente nesse período.")
     for item in assignments:
         due = item["due"]
         label = due.astimezone(tz).strftime("%d/%m às %H:%M") if due else "sem prazo"
-        if due and due < now:
-            label = "ATRASADA — " + label
         lines.extend([f"• {item['course']} — {item['title']}", f"  {label}", item["url"]])
-    lines.append("\nAnúncios dos últimos 7 dias")
+    since = since or now - timedelta(hours=24)
+    lines.append(f"\nNovos anúncios desde {since.astimezone(tz):%d/%m/%Y às %H:%M}")
     if not announcements:
         lines.append("Nenhum anúncio nesse período.")
     for item in announcements:
@@ -158,27 +169,57 @@ def send(text, channel):
             smtp.send_message(message)
 
 
-def run(args):
+def read_state(path):
+    return json.loads(path.read_text()) if path.exists() else {}
+
+
+def delivery_key(args, channel=None):
+    channel = channel or args.channel
+    destination = {"telegram": "TELEGRAM_CHAT_ID", "email": "REMINDER_EMAIL"}.get(channel)
+    identity = [channel, os.getenv("CANVAS_BASE_URL", "https://bcourses.berkeley.edu").rstrip("/"),
+                required(destination) if destination else "console"]
+    return hashlib.sha256(json.dumps(identity).encode()).hexdigest()
+
+
+def run(args, daily_key=None, day=None):
     now = datetime.now(timezone.utc)
+    state_path = Path(args.state)
+    state = read_state(state_path)
+    key = delivery_key(args)
+    # Preview uses Telegram's watermark when configured, without advancing it.
+    if args.channel == "console" and os.getenv("TELEGRAM_CHAT_ID"):
+        key = delivery_key(args, "telegram")
+    since = timestamp(state.get("deliveries", {}).get(key)) or now - timedelta(hours=24)
     canvas = Canvas(os.getenv("CANVAS_BASE_URL", "https://bcourses.berkeley.edu"), required("CANVAS_TOKEN"))
-    assignments, announcements = collect(canvas, now, args.days)
-    send(render(assignments, announcements, now, ZoneInfo(args.timezone), args.days), args.channel)
+    assignments, announcements = collect(canvas, now, args.days, since)
+    send(render(assignments, announcements, now, ZoneInfo(args.timezone), args.days, since), args.channel)
+    if args.channel != "console":
+        # Advance only after ALL chunks have been accepted. Use fetch start time
+        # so announcements published while collecting are picked up next time.
+        state.setdefault("deliveries", {})[key] = now.isoformat()
+        if daily_key:
+            state.setdefault("daily", {})[daily_key] = day
+        temporary = state_path.with_suffix(".tmp")
+        temporary.write_text(json.dumps(state))
+        temporary.replace(state_path)
 
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--channel", choices=["console", "telegram", "email"], default="console")
-    parser.add_argument("--days", type=int, default=14)
+    parser.add_argument("--days", type=int, help="Limitar tarefas aos próximos N dias (padrão: todas as abertas)")
     parser.add_argument("--timezone", default="America/Los_Angeles")
     parser.add_argument("--daily-at", help="Ficar em execução e enviar diariamente, HH:MM no fuso escolhido")
     parser.add_argument("--state", default=".reminder-state.json")
     args = parser.parse_args()
-    if args.days < 1:
+    if args.days is not None and args.days < 1:
         parser.error("--days precisa ser positivo")
     tz = ZoneInfo(args.timezone)
     if not args.daily_at:
         run(args)
         return
+    if args.channel == "console":
+        parser.error("--daily-at requer --channel telegram ou email")
     try:
         hour, minute = map(int, args.daily_at.split(":"))
         if not (0 <= hour <= 23 and 0 <= minute <= 59):
@@ -186,19 +227,15 @@ def main():
     except ValueError:
         parser.error("--daily-at precisa estar no formato HH:MM válido")
     state_path = Path(args.state)
-    state = json.loads(state_path.read_text()) if state_path.exists() else {}
-    key = f"{args.channel}:{args.timezone}:{args.daily_at}"
+    key = f"{delivery_key(args)}:{args.timezone}:{args.daily_at}"
     print(f"Aguardando envio diário às {args.daily_at} ({tz}).", flush=True)
     while True:
         now = datetime.now(tz)
         today = now.date().isoformat()
-        if (now.hour, now.minute) >= (hour, minute) and state.get(key) != today:
+        state = read_state(state_path)
+        if (now.hour, now.minute) >= (hour, minute) and state.get("daily", {}).get(key) != today:
             try:
-                run(args)
-                state[key] = today
-                temporary = state_path.with_suffix(".tmp")
-                temporary.write_text(json.dumps(state))
-                temporary.replace(state_path)
+                run(args, key, today)
                 print(f"Resumo enviado: {today}", flush=True)
             except (HTTPError, URLError, ValueError, OSError):
                 # Do not log exception URLs: Telegram URLs contain the bot token.

@@ -6,9 +6,9 @@ Usa Python 3.11+ e a biblioteca padrão; não há pacotes para instalar.
 ## O que entra no resumo
 
 - Disciplinas com matrícula ativa como aluno.
-- Tarefas publicadas e acessíveis: atrasadas, com vencimento nos próximos 14 dias e sem prazo.
+- Todas as tarefas publicadas, acessíveis e ainda abertas, inclusive sem prazo. Tarefas com `due_at` vencido, `lock_at` encerrado ou `unlock_at` futuro são excluídas. Isso também exclui tarefas atrasadas mesmo que o professor aceite entrega com atraso.
 - Entregas registradas e tarefas dispensadas são omitidas. Tarefas marcadas como faltantes continuam aparecendo, mesmo com nota zero.
-- Anúncios dos últimos sete dias, com trecho do texto e link, repetidos no resumo durante esse período.
+- Anúncios publicados desde o último resumo enviado com sucesso para aquele destino, com trecho do texto e link. No primeiro envio, considera as últimas 24 horas. O corte avança somente depois que todas as mensagens são aceitas pelo serviço.
 - Horários de Berkeley (`America/Los_Angeles`), incluindo horário de verão.
 
 O resumo depende dos dados disponíveis na API. Confira também o bCourses: atividades em ferramentas externas ou com configurações especiais podem não aparecer como pendentes no Canvas.
@@ -60,7 +60,9 @@ bash start_daily.sh
 
 O processo precisa rodar continuamente em um computador ou servidor ligado. Uma sessão temporária de desenvolvimento não garante notificações quando suspensa. Para uso permanente, execute o comando como serviço no provedor escolhido, com reinício automático e variáveis secretas configuradas. Nenhum serviço foi publicado por este projeto.
 
-O arquivo local `.reminder-state.json` registra o dia do último envio bem-sucedido. Preserve-o entre reinícios e execute uma única instância por destino. Se iniciar depois do horário, envia o resumo daquele dia imediatamente. Falhas são repetidas a cada cinco minutos. Uma interrupção durante o envio pode repetir mensagens; não há garantia de entrega exatamente uma vez.
+O arquivo local `.reminder-state.json` registra o dia e o instante do último resumo enviado com sucesso. Preserve-o entre reinícios e execute uma única instância por destino. Se iniciar depois do horário, envia o resumo daquele dia imediatamente. Falhas são repetidas a cada cinco minutos, sem avançar o corte dos anúncios. Uma interrupção durante o envio pode repetir mensagens; não há garantia de entrega exatamente uma vez. Se o estado for apagado, o próximo envio volta à janela inicial de 24 horas.
+
+O comando de visualização no terminal não altera o estado; quando `TELEGRAM_CHAT_ID` está configurado, usa o último corte do Telegram. Um envio manual real atualiza o corte dos anúncios para o próximo resumo, mas não cancela o envio diário agendado. Estados antigos que só registravam o dia usam a janela inicial de 24 horas no primeiro envio desta versão.
 
 Opções: `--days 30`, `--timezone America/Los_Angeles`, `--state /caminho/estado.json`. Sem `--daily-at`, executa uma vez e encerra. Não inclua arquivos com segredos no Git.
 
